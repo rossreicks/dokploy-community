@@ -37,6 +37,7 @@ const baseApp: ApplicationNested = {
 	autoDeploy: true,
 	enableSubmodules: false,
 	previewRequireCollaboratorPermissions: false,
+	snapvisorProjectName: null,
 	serverId: "",
 	branch: null,
 	dockerBuildStage: "",
@@ -170,6 +171,10 @@ const baseDomain: Domain = {
 	cloudflareIngressApplied: false,
 	enableCloudflareAccess: false,
 	cloudflareAccessApplicationId: null,
+	dodomainConnectionId: null,
+	dodomainSessionId: null,
+	dnsVerificationStatus: null,
+	dnsVerifiedAt: null,
 	enabled: true,
 };
 
