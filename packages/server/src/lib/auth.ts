@@ -231,7 +231,15 @@ const createBetterAuth = () =>
 				if (!succeeded) return;
 				const consumed = body.refresh_token;
 				if (typeof consumed === "string" && consumed) {
-					await consumeRotatedRefreshToken(consumed);
+					// Hygiene only. The plugin has already rotated and the response
+					// carries the new tokens; a failure here must not turn a
+					// successful refresh into a 500 that makes the client drop its
+					// grant and start a browser re-authorization.
+					try {
+						await consumeRotatedRefreshToken(consumed);
+					} catch (error) {
+						console.error("[mcp] failed to clamp rotated refresh token", error);
+					}
 				}
 			}),
 		},
@@ -763,62 +771,112 @@ export const buildMemberSession = async (
 	};
 };
 
+/**
+ * Outcome of checking a Dokploy API key. A key that is over its per-key rate
+ * limit is still a good key, so it is reported apart from an invalid one:
+ * callers that answer 401 for invalid keys should answer 429 for throttled
+ * ones, or clients will treat a busy key as a lost login.
+ */
+export type ApiKeyVerification =
+	| {
+			status: "valid";
+			member: Awaited<ReturnType<typeof buildMemberSession>>;
+	  }
+	| { status: "invalid" }
+	| { status: "rate_limited"; retryAfterSeconds: number };
+
+/** Seconds until a throttled key may retry, from better-auth's `tryAgainIn` (ms). */
+const retryAfterSecondsFrom = (error: unknown) => {
+	const source = error as {
+		details?: { tryAgainIn?: unknown };
+		tryAgainIn?: unknown;
+	};
+	const tryAgainIn = Number(source.details?.tryAgainIn ?? source.tryAgainIn);
+	if (!Number.isFinite(tryAgainIn) || tryAgainIn <= 0) return 1;
+	return Math.max(1, Math.ceil(tryAgainIn / 1000));
+};
+
+/**
+ * Resolves a Dokploy API key to the member session of its owner inside the
+ * organization the key was created for, telling a throttled key apart from
+ * an unknown, expired, disabled or organization-less one.
+ */
+export const verifyApiKeyDetailed = async (
+	apiKey: string,
+): Promise<ApiKeyVerification> => {
+	const api = getApi();
+	try {
+		const { valid, key, error } = await api.verifyApiKey({
+			body: {
+				key: apiKey,
+			},
+		});
+
+		if (error) {
+			if ((error as { code?: unknown }).code === "RATE_LIMITED") {
+				return {
+					status: "rate_limited",
+					retryAfterSeconds: retryAfterSecondsFrom(error),
+				};
+			}
+			throw new Error(error.message?.toString() || "Error verifying API key");
+		}
+		if (!valid || !key) {
+			return { status: "invalid" };
+		}
+
+		const apiKeyRecord = await db.query.apikey.findFirst({
+			where: eq(schema.apikey.id, key.id),
+			with: {
+				user: true,
+			},
+		});
+
+		if (!apiKeyRecord) {
+			return { status: "invalid" };
+		}
+
+		const organizationId = (
+			JSON.parse(apiKeyRecord.metadata || "{}") as {
+				organizationId?: string;
+			}
+		).organizationId;
+
+		if (!organizationId) {
+			return { status: "invalid" };
+		}
+
+		return {
+			status: "valid",
+			member: await buildMemberSession(apiKeyRecord.user, organizationId),
+		};
+	} catch (error) {
+		console.error("Error verifying API key", error);
+		return { status: "invalid" };
+	}
+};
+
+/**
+ * Resolves a Dokploy API key to the member session of its owner inside the
+ * organization the key was created for. Null for unknown, expired, disabled,
+ * throttled or organization-less keys. Used by the REST/tRPC `x-api-key` path;
+ * the MCP endpoint uses {@link verifyApiKeyDetailed} to answer 429 on throttling.
+ */
+export const validateApiKey = async (apiKey: string) => {
+	const verification = await verifyApiKeyDetailed(apiKey);
+	return verification.status === "valid" ? verification.member : null;
+};
+
 export const validateRequest = async (request: IncomingMessage) => {
 	const api = getApi();
 	const apiKey = request.headers["x-api-key"] as string;
 	if (apiKey) {
-		try {
-			const { valid, key, error } = await api.verifyApiKey({
-				body: {
-					key: apiKey,
-				},
-			});
-
-			if (error) {
-				throw new Error(error.message?.toString() || "Error verifying API key");
-			}
-			if (!valid || !key) {
-				return {
-					session: null,
-					user: null,
-				};
-			}
-
-			const apiKeyRecord = await db.query.apikey.findFirst({
-				where: eq(schema.apikey.id, key.id),
-				with: {
-					user: true,
-				},
-			});
-
-			if (!apiKeyRecord) {
-				return {
-					session: null,
-					user: null,
-				};
-			}
-
-			const organizationId = (
-				JSON.parse(apiKeyRecord.metadata || "{}") as {
-					organizationId?: string;
-				}
-			).organizationId;
-
-			if (!organizationId) {
-				return {
-					session: null,
-					user: null,
-				};
-			}
-
-			return await buildMemberSession(apiKeyRecord.user, organizationId);
-		} catch (error) {
-			console.error("Error verifying API key", error);
-			return {
+		return (
+			(await validateApiKey(apiKey)) ?? {
 				session: null,
 				user: null,
-			};
-		}
+			}
+		);
 	}
 
 	// If no API key, proceed with normal session validation
