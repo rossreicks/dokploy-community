@@ -1422,6 +1422,69 @@
       "when": 1789736830598,
       "tag": "0202_fork_schema_catchup_v2",
       "breakpoints": true
+    },
+    {
+      "idx": 203,
+      "version": "7",
+      "when": 1790126754380,
+      "tag": "0203_superb_justin_hammer",
+      "breakpoints": true
+    },
+    {
+      "idx": 204,
+      "version": "7",
+      "when": 1790128292693,
+      "tag": "0204_massive_storm",
+      "breakpoints": true
+    },
+    {
+      "idx": 205,
+      "version": "7",
+      "when": 1790130046362,
+      "tag": "0205_premium_inertia",
+      "breakpoints": true
+    },
+    {
+      "idx": 206,
+      "version": "7",
+      "when": 1790132164605,
+      "tag": "0206_blushing_miss_america",
+      "breakpoints": true
+    },
+    {
+      "idx": 207,
+      "version": "7",
+      "when": 1791370398351,
+      "tag": "0207_deployment_queue_journal",
+      "breakpoints": true
+    },
+    {
+      "idx": 208,
+      "version": "7",
+      "when": 1791412265920,
+      "tag": "0208_compose_build_server",
+      "breakpoints": true
+    },
+    {
+      "idx": 209,
+      "version": "7",
+      "when": 1791522896676,
+      "tag": "0209_preview_docker_image",
+      "breakpoints": true
+    },
+    {
+      "idx": 210,
+      "version": "7",
+      "when": 1791533105237,
+      "tag": "0210_better_auth_1_7_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 211,
+      "version": "7",
+      "when": 1791533152655,
+      "tag": "0211_better_auth_1_7_grants",
+      "breakpoints": true
     }
   ]
 }

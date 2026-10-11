@@ -16,6 +16,13 @@ vi.mock("@dokploy/server/lib/auth", async (importOriginal) => {
 		await importOriginal<typeof import("@dokploy/server/lib/auth")>();
 	return {
 		...actual,
+		verifyApiKeyDetailed: vi.fn(async () =>
+			apiKeyThrottledFor !== null
+				? { status: "rate_limited", retryAfterSeconds: apiKeyThrottledFor }
+				: apiKeyResult
+					? { status: "valid", member: apiKeyResult }
+					: { status: "invalid" },
+		),
 		buildMemberSession: vi.fn(async (user: { id: string }, orgId: string) => ({
 			session: { userId: user.id, activeOrganizationId: orgId },
 			user: {
@@ -30,11 +37,26 @@ vi.mock("@dokploy/server/lib/auth", async (importOriginal) => {
 
 let tokenRow: { userId: string; clientId: string; scopes: string[] } | null =
 	null;
+let apiKeyResult: { session: unknown; user: unknown } | null = null;
+let apiKeyThrottledFor: number | null = null;
 let organizationId: string | null = "org-1";
 
 const { db } = await import("@dokploy/server/db");
-const { authenticateMcpBearer, executeMcpTool, unauthorizedPayload } =
-	await import("@/server/mcp/handler");
+const {
+	authenticateMcpBearer,
+	authenticateMcpRequest,
+	clearMcpApiKeyHandshakeCache,
+	describeRejectedMcpRequest,
+	invokesTool,
+	McpApiKeyRateLimitedError,
+	executeMcpTool,
+	MCP_API_KEY_CLIENT_ID,
+	unauthorizedPayload,
+} = await import("@/server/mcp/handler");
+const { DOKPLOY_MCP_SCOPE_IDS } = await import(
+	"@dokploy/server/services/mcp-oauth"
+);
+const { verifyApiKeyDetailed } = await import("@dokploy/server/lib/auth");
 const findFirst = vi.mocked(db.query.user.findFirst);
 
 const readTool = {
@@ -101,6 +123,215 @@ describe("authenticateMcpBearer", () => {
 			activeOrganizationId: "org-1",
 		});
 		expect(auth?.user.id).toBe("user-1");
+	});
+});
+
+describe("authenticateMcpRequest", () => {
+	beforeEach(() => {
+		tokenRow = {
+			userId: "user-1",
+			clientId: "client-1",
+			scopes: ["openid", "dokploy:read"],
+		};
+		organizationId = "org-1";
+		apiKeyResult = null;
+		apiKeyThrottledFor = null;
+		findFirst.mockReset();
+		findFirst.mockResolvedValue({ id: "user-1", firstName: "Ada" } as never);
+		vi.mocked(verifyApiKeyDetailed).mockClear();
+		clearMcpApiKeyHandshakeCache();
+	});
+
+	it("falls back to the OAuth bearer when no api key is sent", async () => {
+		const auth = await authenticateMcpRequest({ authorization: "Bearer tok" });
+		expect(auth?.clientId).toBe("client-1");
+		expect(verifyApiKeyDetailed).not.toHaveBeenCalled();
+	});
+
+	it("grants every MCP scope to a valid api key without touching the bearer path", async () => {
+		apiKeyResult = {
+			session: { userId: "user-9", activeOrganizationId: "org-9" },
+			user: { id: "user-9", email: "k@example.com", role: "owner" },
+		};
+		tokenRow = null;
+		const auth = await authenticateMcpRequest({
+			"x-api-key": "dk_live_1",
+			authorization: "Bearer stale",
+		});
+		expect(auth?.clientId).toBe(MCP_API_KEY_CLIENT_ID);
+		expect(auth?.userId).toBe("user-9");
+		expect(auth?.session).toEqual({
+			userId: "user-9",
+			activeOrganizationId: "org-9",
+		});
+		expect([...(auth?.scopes ?? [])].sort()).toEqual(
+			[...DOKPLOY_MCP_SCOPE_IDS].sort(),
+		);
+		expect(verifyApiKeyDetailed).toHaveBeenCalledWith("dk_live_1");
+	});
+
+	it("rejects an unknown api key instead of trying the bearer", async () => {
+		const auth = await authenticateMcpRequest({
+			"x-api-key": "nope",
+			authorization: "Bearer tok",
+		});
+		expect(auth).toBeNull();
+	});
+
+	it("throws a rate-limit error for a throttled api key instead of rejecting it", async () => {
+		apiKeyThrottledFor = 42;
+		const attempt = authenticateMcpRequest({ "x-api-key": "dk_busy" });
+		await expect(attempt).rejects.toBeInstanceOf(McpApiKeyRateLimitedError);
+		await expect(attempt).rejects.toMatchObject({ retryAfterSeconds: 42 });
+	});
+
+	it("shares one api-key check across a burst of protocol-only requests", async () => {
+		apiKeyResult = {
+			session: { userId: "user-9", activeOrganizationId: "org-9" },
+			user: { id: "user-9", email: "k@example.com", role: "owner" },
+		};
+		const burst = await Promise.all(
+			Array.from({ length: 50 }, () =>
+				authenticateMcpRequest(
+					{ "x-api-key": "dk_fleet" },
+					{ countsAgainstRateLimit: false },
+				),
+			),
+		);
+		expect(burst.every((auth) => auth?.userId === "user-9")).toBe(true);
+		const later = await authenticateMcpRequest(
+			{ "x-api-key": "dk_fleet" },
+			{ countsAgainstRateLimit: false },
+		);
+		expect(later?.userId).toBe("user-9");
+		expect(verifyApiKeyDetailed).toHaveBeenCalledTimes(1);
+	});
+
+	it("marks every request but the one that ran the shared check as reused", async () => {
+		apiKeyResult = {
+			session: { userId: "user-9", activeOrganizationId: "org-9" },
+			user: { id: "user-9", email: "k@example.com", role: "owner" },
+		};
+		const burst = await Promise.all(
+			Array.from({ length: 5 }, () =>
+				authenticateMcpRequest(
+					{ "x-api-key": "dk_fleet" },
+					{ countsAgainstRateLimit: false },
+				),
+			),
+		);
+		expect(verifyApiKeyDetailed).toHaveBeenCalledTimes(1);
+		expect(burst.filter((auth) => !auth?.reusedVerification)).toHaveLength(1);
+		const cached = await authenticateMcpRequest(
+			{ "x-api-key": "dk_fleet" },
+			{ countsAgainstRateLimit: false },
+		);
+		expect(cached?.reusedVerification).toBe(true);
+		const counted = await authenticateMcpRequest({ "x-api-key": "dk_fleet" });
+		expect(counted?.reusedVerification).toBeUndefined();
+	});
+
+	it("keeps serving protocol traffic from a recent check while the key is throttled", async () => {
+		apiKeyResult = {
+			session: { userId: "user-9", activeOrganizationId: "org-9" },
+			user: { id: "user-9", email: "k@example.com", role: "owner" },
+		};
+		await authenticateMcpRequest({ "x-api-key": "dk_fleet" });
+		apiKeyThrottledFor = 30;
+		const handshake = await authenticateMcpRequest(
+			{ "x-api-key": "dk_fleet" },
+			{ countsAgainstRateLimit: false },
+		);
+		expect(handshake?.userId).toBe("user-9");
+		await expect(
+			authenticateMcpRequest({ "x-api-key": "dk_fleet" }),
+		).rejects.toBeInstanceOf(McpApiKeyRateLimitedError);
+	});
+
+	it("always re-verifies tool calls and drops the reuse once the key is revoked", async () => {
+		apiKeyResult = {
+			session: { userId: "user-9", activeOrganizationId: "org-9" },
+			user: { id: "user-9", email: "k@example.com", role: "owner" },
+		};
+		await authenticateMcpRequest({ "x-api-key": "dk_fleet" });
+		await authenticateMcpRequest({ "x-api-key": "dk_fleet" });
+		expect(verifyApiKeyDetailed).toHaveBeenCalledTimes(2);
+
+		apiKeyResult = null;
+		expect(
+			await authenticateMcpRequest({ "x-api-key": "dk_fleet" }),
+		).toBeNull();
+		expect(
+			await authenticateMcpRequest(
+				{ "x-api-key": "dk_fleet" },
+				{ countsAgainstRateLimit: false },
+			),
+		).toBeNull();
+		expect(verifyApiKeyDetailed).toHaveBeenCalledTimes(4);
+	});
+
+	it("never reuses a check made for a different key", async () => {
+		apiKeyResult = {
+			session: { userId: "user-9", activeOrganizationId: "org-9" },
+			user: { id: "user-9", email: "k@example.com", role: "owner" },
+		};
+		await authenticateMcpRequest(
+			{ "x-api-key": "dk_fleet" },
+			{ countsAgainstRateLimit: false },
+		);
+		apiKeyResult = null;
+		expect(
+			await authenticateMcpRequest(
+				{ "x-api-key": "dk_other" },
+				{ countsAgainstRateLimit: false },
+			),
+		).toBeNull();
+	});
+
+	it("classifies rejected requests without leaking the token", () => {
+		expect(describeRejectedMcpRequest({})).toBe("no_credentials");
+		expect(describeRejectedMcpRequest({ "x-api-key": "k" })).toBe(
+			"api_key_invalid",
+		);
+		expect(describeRejectedMcpRequest({ authorization: "Basic x" })).toBe(
+			"not_bearer",
+		);
+		expect(describeRejectedMcpRequest({ authorization: "Bearer " })).toBe(
+			"empty_bearer",
+		);
+		expect(
+			describeRejectedMcpRequest({
+				authorization: "Bearer abcdefghijklmnopqrstuvwxyz",
+			}),
+		).toBe("bearer_rejected tokenPrefix=abcdefgh");
+	});
+});
+
+describe("invokesTool", () => {
+	it("treats handshake and listing traffic as protocol-only", () => {
+		expect(invokesTool({ jsonrpc: "2.0", id: 1, method: "initialize" })).toBe(
+			false,
+		);
+		expect(
+			invokesTool({ jsonrpc: "2.0", method: "notifications/initialized" }),
+		).toBe(false);
+		expect(invokesTool({ jsonrpc: "2.0", id: 2, method: "tools/list" })).toBe(
+			false,
+		);
+	});
+
+	it("flags tool calls, including inside a batch, and unparseable shapes", () => {
+		expect(invokesTool({ jsonrpc: "2.0", id: 3, method: "tools/call" })).toBe(
+			true,
+		);
+		expect(
+			invokesTool([
+				{ jsonrpc: "2.0", id: 4, method: "tools/list" },
+				{ jsonrpc: "2.0", id: 5, method: "tools/call" },
+			]),
+		).toBe(true);
+		expect(invokesTool(null)).toBe(true);
+		expect(invokesTool("tools/list")).toBe(true);
 	});
 });
 

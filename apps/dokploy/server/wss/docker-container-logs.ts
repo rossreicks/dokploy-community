@@ -5,6 +5,7 @@ import { spawn as spawnPty } from "node-pty";
 import { Client, type ClientChannel } from "ssh2";
 import { WebSocketServer } from "ws";
 import { canAccessDockerOverWss } from "./authorize";
+import { onGuardedConnection } from "./guard";
 import {
 	buildDockerLogsArguments,
 	createDockerLogsDataHandler,
@@ -37,7 +38,7 @@ export const setupDockerContainerLogsWebSocketServer = (
 	});
 
 	// eslint-disable-next-line @typescript-eslint/no-misused-promises
-	wssTerm.on("connection", async (ws, req) => {
+	onGuardedConnection(wssTerm, "docker-container-logs", async (ws, req) => {
 		const url = new URL(req.url || "", `http://${req.headers.host}`);
 		const containerId = url.searchParams.get("containerId");
 		const tail = url.searchParams.get("tail") ?? "100";
@@ -220,20 +221,6 @@ export const setupDockerContainerLogsWebSocketServer = (
 				});
 				localProcess = childProcess;
 
-				// Separate interactive process so the "Send a command" input in the
-				// logs view can forward keystrokes to the container's stdin. The logs
-				// stream above is output-only (stdio stdin is ignored), so attaching
-				// keeps interactivity while the child_process handles clean teardown.
-				const attachPty = spawnPty("docker", ["attach", containerId], {
-					name: "xterm-256color",
-					cwd: process.env.HOME,
-					env: process.env,
-					encoding: "utf8",
-					cols: 80,
-					rows: 30,
-				});
-				localAttach = attachPty;
-
 				childProcess.stdout.on("data", stdout.write);
 				childProcess.stderr.on("data", stderr.write);
 				childProcess.once("close", () => {
@@ -254,7 +241,32 @@ export const setupDockerContainerLogsWebSocketServer = (
 						} else {
 							command = message;
 						}
-						attachPty.write(`${command.toString()}\n`);
+						if (isClosed) return;
+
+						// Viewing logs must not attach to the container's stdin. Only
+						// attach for explicit input, and never forward teardown signals.
+						if (!localAttach) {
+							const attach = spawnPty(
+								"docker",
+								["attach", "--sig-proxy=false", containerId],
+								{
+									name: "xterm-256color",
+									cwd: process.env.HOME,
+									env: process.env,
+									encoding: "utf8",
+									cols: 80,
+									rows: 30,
+								},
+							);
+							localAttach = attach;
+							// Logs arrive through docker logs; drain duplicate attach output.
+							attach.onData(() => {});
+							// The attach ends with its container; the next input spawns a new one.
+							attach.onExit(() => {
+								if (localAttach === attach) localAttach = undefined;
+							});
+						}
+						localAttach.write(`${command.toString()}\n`);
 					} catch (error) {
 						// @ts-ignore
 						const errorMessage = error?.message as unknown as string;

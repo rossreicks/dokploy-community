@@ -2,6 +2,7 @@ import {
 	assertNetworkIdsAttachableToResource,
 	// build-policy hook: required-checks support check at the API boundary.
 	assertRequiredChecksSupportedForUpdate,
+	cancelBuildServerDeploymentsForService,
 	clearOldDeployments,
 	createApplication,
 	createDomain,
@@ -104,7 +105,6 @@ function resolveDockerProviderFields(
 	const base = {
 		dockerImage: input.dockerImage,
 		sourceType: "docker" as const,
-		applicationStatus: "idle" as const,
 		isPreviewDeploymentsActive: false,
 	};
 
@@ -605,7 +605,6 @@ export const applicationRouter = createTRPCRouter({
 				sourceType: "github",
 				owner: input.owner,
 				buildPath: input.buildPath,
-				applicationStatus: "idle",
 				githubId: input.githubId,
 				watchPaths: input.watchPaths,
 				triggerType: input.triggerType,
@@ -632,7 +631,6 @@ export const applicationRouter = createTRPCRouter({
 				gitlabBranch: input.gitlabBranch,
 				gitlabBuildPath: input.gitlabBuildPath,
 				sourceType: "gitlab",
-				applicationStatus: "idle",
 				gitlabId: input.gitlabId,
 				gitlabProjectId: input.gitlabProjectId,
 				gitlabPathNamespace: input.gitlabPathNamespace,
@@ -662,7 +660,6 @@ export const applicationRouter = createTRPCRouter({
 				bitbucketBranch: input.bitbucketBranch,
 				bitbucketBuildPath: input.bitbucketBuildPath,
 				sourceType: "bitbucket",
-				applicationStatus: "idle",
 				bitbucketId: input.bitbucketId,
 				watchPaths: input.watchPaths,
 				enableSubmodules: input.enableSubmodules,
@@ -689,7 +686,6 @@ export const applicationRouter = createTRPCRouter({
 				giteaBranch: input.giteaBranch,
 				giteaBuildPath: input.giteaBuildPath,
 				sourceType: "gitea",
-				applicationStatus: "idle",
 				giteaId: input.giteaId,
 				watchPaths: input.watchPaths,
 				enableSubmodules: input.enableSubmodules,
@@ -735,7 +731,6 @@ export const applicationRouter = createTRPCRouter({
 				customGitUrl: input.customGitUrl,
 				customGitSSHKeyId: input.customGitSSHKeyId,
 				sourceType: "git",
-				applicationStatus: "idle",
 				watchPaths: input.watchPaths,
 				enableSubmodules: input.enableSubmodules,
 				isPreviewDeploymentsActive: false,
@@ -789,7 +784,6 @@ export const applicationRouter = createTRPCRouter({
 				customGitSSHKeyId: null,
 
 				sourceType: "github", // Reset to default
-				applicationStatus: "idle",
 				watchPaths: null,
 				enableSubmodules: false,
 			});
@@ -1039,7 +1033,16 @@ export const applicationRouter = createTRPCRouter({
 				deployment: ["cancel"],
 			});
 			const application = await findApplicationById(input.applicationId);
-			await killDockerBuild("application", application.serverId);
+			// A build on a build server is stopped there, by deployment (see
+			// deployment-cancel.ts). The `pkill` below only ever runs on the host
+			// that serves the application, where it would hit unrelated builds.
+			const remote = await cancelBuildServerDeploymentsForService({
+				type: "application",
+				applicationId: input.applicationId,
+			});
+			if (!remote.usesBuildServer && !application.buildServerId) {
+				await killDockerBuild("application", application.serverId);
+			}
 			await audit(ctx, {
 				action: "stop",
 				resourceType: "application",
@@ -1553,6 +1556,13 @@ export const applicationRouter = createTRPCRouter({
 		}),
 
 	transferWithLogs: protectedProcedure
+		.meta({
+			openapi: {
+				enabled: false,
+				method: "POST",
+				path: "/application.transferWithLogs",
+			},
+		})
 		.input(
 			apiTransferApplication.extend({
 				decisions: z

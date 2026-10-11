@@ -19,6 +19,7 @@ import { dockerRouter } from "./routers/docker";
 import { dockerDiskUsageRouter } from "./routers/docker-disk-usage";
 import { dockerImageRouter } from "./routers/docker-image";
 import { dockerVolumeRouter } from "./routers/docker-volume";
+import { dodomainRouter } from "./routers/dodomain";
 import { domainRouter } from "./routers/domain";
 import { environmentRouter } from "./routers/environment";
 import { gitProviderRouter } from "./routers/git-provider";
@@ -55,10 +56,12 @@ import { scheduleRouter } from "./routers/schedule";
 import { securityRouter } from "./routers/security";
 import { serverRouter } from "./routers/server";
 import { settingsRouter } from "./routers/settings";
+import { snapvisorRouter } from "./routers/snapvisor";
 import { sshRouter } from "./routers/ssh-key";
 import { stripeRouter } from "./routers/stripe";
 import { swarmRouter } from "./routers/swarm";
 import { tagRouter } from "./routers/tag";
+import { uptimelyRouter } from "./routers/uptimely";
 import { userRouter } from "./routers/user";
 import { vaultProviderRouter } from "./routers/vault-provider";
 import { volumeBackupsRouter } from "./routers/volume-backups";
@@ -110,9 +113,12 @@ export const appRouter = createTRPCRouter({
 	security: securityRouter,
 	server: serverRouter,
 	settings: settingsRouter,
+	snapvisor: snapvisorRouter,
 	sshKey: sshRouter,
 	stripe: stripeRouter,
 	swarm: swarmRouter,
+	uptimely: uptimelyRouter,
+	dodomain: dodomainRouter,
 	user: userRouter,
 	vaultProvider: vaultProviderRouter,
 	ai: aiRouter,

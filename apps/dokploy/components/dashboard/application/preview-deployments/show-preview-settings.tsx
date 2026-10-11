@@ -1,3 +1,11 @@
+import {
+	getPreviewImageTemplateError,
+	PREVIEW_IMAGE_PLACEHOLDER,
+} from "@dokploy/server/utils/preview-image";
+import {
+	isValidPreviewWildcard,
+	PREVIEW_WILDCARD_GUIDANCE,
+} from "@dokploy/server/utils/preview-wildcard";
 import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
 import { HelpCircle, Plus, Settings2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -5,6 +13,7 @@ import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
 import { AlertBlock } from "@/components/shared/alert-block";
+import { LearnMoreLink } from "@/components/shared/learn-more-link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -42,13 +51,128 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { api } from "@/utils/api";
+import { INTEGRATION_LEARN_MORE_URLS } from "../../settings/integrations/integration-links";
+import {
+	PoweredBySnapvisor,
+	SnapvisorMark,
+} from "../../settings/integrations/snapvisor/snapvisor-logo";
+
+const SNAPVISOR_OFF = "__off__";
+
+/**
+ * Visual testing (Snapvisor) section: which Snapvisor project this
+ * application's preview deployments register their commit against. Hidden
+ * (with a hint) when the organization has no Snapvisor integration.
+ */
+const SnapvisorPreviewSettingSection = ({
+	applicationId,
+}: {
+	applicationId: string;
+}) => {
+	const { data: integration, isPending: isLoadingIntegration } =
+		api.snapvisor.one.useQuery();
+	const { data: application } = api.application.one.useQuery({
+		applicationId,
+	});
+	const { data: projects, isPending: isLoadingProjects } =
+		api.snapvisor.projects.useQuery(undefined, { enabled: !!integration });
+	const utils = api.useUtils();
+	const { mutateAsync: setApplicationProject, isPending: isSaving } =
+		api.snapvisor.setApplicationProject.useMutation();
+
+	if (isLoadingIntegration) return null;
+
+	if (!integration) {
+		return (
+			<div className="flex flex-row items-center justify-between p-3 border rounded-lg shadow-xs text-sm text-muted-foreground">
+				<span>
+					Connect Snapvisor in{" "}
+					<a href="/dashboard/settings/integrations" className="underline">
+						Settings → Integrations
+					</a>{" "}
+					to show visual-diff status on this application&apos;s previews.
+				</span>
+				<LearnMoreLink
+					href={INTEGRATION_LEARN_MORE_URLS.snapvisor}
+					className="shrink-0"
+				/>
+			</div>
+		);
+	}
+
+	const onChange = async (value: string) => {
+		const projectName = value === SNAPVISOR_OFF ? null : value;
+		await setApplicationProject({ applicationId, projectName })
+			.then(async () => {
+				toast.success(
+					projectName
+						? `Visual testing linked to "${projectName}"`
+						: "Visual testing turned off",
+				);
+				await utils.application.one.invalidate({ applicationId });
+			})
+			.catch((error) => {
+				toast.error("Error updating the Snapvisor project", {
+					description: error.message,
+				});
+			});
+	};
+
+	return (
+		<div className="flex flex-col gap-2 p-3 border rounded-lg shadow-xs">
+			<div className="flex flex-row items-center justify-between">
+				<div className="flex flex-row items-start gap-3">
+					<SnapvisorMark className="size-8 shrink-0" />
+					<div className="space-y-0.5">
+						<FormLabel>Visual testing (Snapvisor)</FormLabel>
+						<FormDescription>
+							Register each preview deployment with a Snapvisor project so its
+							visual-diff status shows on the preview card.
+						</FormDescription>
+					</div>
+				</div>
+			</div>
+			<Select
+				value={application?.snapvisorProjectName ?? SNAPVISOR_OFF}
+				onValueChange={onChange}
+				disabled={isSaving || isLoadingProjects}
+			>
+				<SelectTrigger>
+					<SelectValue placeholder="Off" />
+				</SelectTrigger>
+				<SelectContent>
+					<SelectItem value={SNAPVISOR_OFF}>Off</SelectItem>
+					{projects?.map((project) => (
+						<SelectItem key={project.id} value={project.name}>
+							{project.name}
+						</SelectItem>
+					))}
+				</SelectContent>
+			</Select>
+			<div className="flex flex-row items-center justify-between gap-2">
+				<LearnMoreLink href={INTEGRATION_LEARN_MORE_URLS.snapvisor} />
+				<PoweredBySnapvisor />
+			</div>
+		</div>
+	);
+};
 
 const schema = z
 	.object({
 		env: z.string(),
 		buildArgs: z.string(),
 		buildSecrets: z.string(),
-		wildcardDomain: z.string(),
+		wildcardDomain: z
+			.string()
+			.refine(isValidPreviewWildcard, { message: PREVIEW_WILDCARD_GUIDANCE }),
+		previewDockerImage: z
+			.string()
+			.superRefine((value, ctx) => {
+				const message = getPreviewImageTemplateError(value);
+				if (message) {
+					ctx.addIssue({ code: "custom", message });
+				}
+			}),
 		port: z.number(),
 		previewLimit: z.number(),
 		previewLabels: z.array(z.string()).optional(),
@@ -111,6 +235,7 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 		defaultValues: {
 			env: "",
 			wildcardDomain: "*.sslip.io",
+			previewDockerImage: "",
 			port: 3000,
 			previewLimit: 3,
 			previewLabels: [],
@@ -122,6 +247,7 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 		resolver: zodResolver(schema),
 	});
 
+	const isDockerImage = data?.sourceType === "docker";
 	const previewHttps = form.watch("previewHttps");
 	const wildcardDomain = form.watch("wildcardDomain");
 	const isTraefikMeDomain = wildcardDomain?.includes("sslip.io") || false;
@@ -162,6 +288,7 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 				buildArgs: data.previewBuildArgs || "",
 				buildSecrets: data.previewBuildSecrets || "",
 				wildcardDomain: data.previewWildcard || defaultWildcard,
+				previewDockerImage: data.previewDockerImage || "",
 				port: data.previewPort || 3000,
 				previewLabels: data.previewLabels || [],
 				previewLimit: data.previewLimit || 3,
@@ -181,6 +308,11 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 			previewBuildArgs: formData.buildArgs,
 			previewBuildSecrets: formData.buildSecrets,
 			previewWildcard: formData.wildcardDomain,
+			// Only Docker-image applications have an image template; leave the
+			// column untouched for every other source type.
+			...(isDockerImage && {
+				previewDockerImage: formData.previewDockerImage.trim() || null,
+			}),
 			previewPort: formData.port,
 			previewLabels: formData.previewLabels,
 			applicationId,
@@ -232,6 +364,38 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 								className="grid w-full gap-4"
 							>
 								<div className="grid gap-4 lg:grid-cols-2">
+									{isDockerImage && (
+										<FormField
+											control={form.control}
+											name="previewDockerImage"
+											render={({ field }) => (
+												<FormItem className="lg:col-span-2">
+													<FormLabel>Preview Image</FormLabel>
+													<FormControl>
+														<Input
+															placeholder={`ghcr.io/acme/app:pr-${PREVIEW_IMAGE_PLACEHOLDER}`}
+															{...field}
+														/>
+													</FormControl>
+													<FormDescription className="flex flex-col gap-1.5">
+														<span>
+															The image each preview pulls. Use{" "}
+															<code className="text-xs">
+																{PREVIEW_IMAGE_PLACEHOLDER}
+															</code>{" "}
+															once, in the tag, for the pull request
+															number or tag you deploy the preview for
+															(it cannot be used in the registry or
+															repository part). Registry credentials of this
+															application are used to pull it. Set the port
+															below to the one the image listens on.
+														</span>
+													</FormDescription>
+													<FormMessage />
+												</FormItem>
+											)}
+										/>
+									)}
 									<FormField
 										control={form.control}
 										name="wildcardDomain"
@@ -293,90 +457,92 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 											</FormItem>
 										)}
 									/>
-									<FormField
-										control={form.control}
-										name="previewLabels"
-										render={({ field }) => (
-											<FormItem className="md:col-span-2">
-												<div className="flex items-center gap-2">
-													<FormLabel>Preview Labels</FormLabel>
-													<TooltipProvider>
-														<Tooltip>
-															<TooltipTrigger asChild>
-																<HelpCircle className="size-4 text-muted-foreground hover:text-foreground transition-colors cursor-pointer" />
-															</TooltipTrigger>
-															<TooltipContent>
-																<p>
-																	Add a labels that will trigger a preview
-																	deployment for a pull request. If no labels
-																	are specified, all pull requests will trigger
-																	a preview deployment.
-																</p>
-															</TooltipContent>
-														</Tooltip>
-													</TooltipProvider>
-												</div>
-												<div className="flex flex-wrap gap-2 mb-2">
-													{field.value?.map((label, index) => (
-														<Badge
-															key={index}
-															variant="secondary"
-															className="flex items-center gap-1"
-														>
-															{label}
-															<X
-																className="size-3 cursor-pointer hover:text-destructive"
-																onClick={() => {
-																	const newLabels = [...(field.value || [])];
-																	newLabels.splice(index, 1);
-																	field.onChange(newLabels);
+									{!isDockerImage && (
+										<FormField
+											control={form.control}
+											name="previewLabels"
+											render={({ field }) => (
+												<FormItem className="md:col-span-2">
+													<div className="flex items-center gap-2">
+														<FormLabel>Preview Labels</FormLabel>
+														<TooltipProvider>
+															<Tooltip>
+																<TooltipTrigger asChild>
+																	<HelpCircle className="size-4 text-muted-foreground hover:text-foreground transition-colors cursor-pointer" />
+																</TooltipTrigger>
+																<TooltipContent>
+																	<p>
+																		Add a labels that will trigger a preview
+																		deployment for a pull request. If no labels
+																		are specified, all pull requests will trigger
+																		a preview deployment.
+																	</p>
+																</TooltipContent>
+															</Tooltip>
+														</TooltipProvider>
+													</div>
+													<div className="flex flex-wrap gap-2 mb-2">
+														{field.value?.map((label, index) => (
+															<Badge
+																key={index}
+																variant="secondary"
+																className="flex items-center gap-1"
+															>
+																{label}
+																<X
+																	className="size-3 cursor-pointer hover:text-destructive"
+																	onClick={() => {
+																		const newLabels = [...(field.value || [])];
+																		newLabels.splice(index, 1);
+																		field.onChange(newLabels);
+																	}}
+																/>
+															</Badge>
+														))}
+													</div>
+													<div className="flex gap-2">
+														<FormControl>
+															<Input
+																placeholder="Enter a label (e.g. enhancements, needs-review)"
+																onKeyDown={(e) => {
+																	if (e.key === "Enter") {
+																		e.preventDefault();
+																		const input = e.currentTarget;
+																		const label = input.value.trim();
+																		if (label) {
+																			field.onChange([
+																				...(field.value || []),
+																				label,
+																			]);
+																			input.value = "";
+																		}
+																	}
 																}}
 															/>
-														</Badge>
-													))}
-												</div>
-												<div className="flex gap-2">
-													<FormControl>
-														<Input
-															placeholder="Enter a label (e.g. enhancements, needs-review)"
-															onKeyDown={(e) => {
-																if (e.key === "Enter") {
-																	e.preventDefault();
-																	const input = e.currentTarget;
-																	const label = input.value.trim();
-																	if (label) {
-																		field.onChange([
-																			...(field.value || []),
-																			label,
-																		]);
-																		input.value = "";
-																	}
+														</FormControl>
+														<Button
+															type="button"
+															variant="outline"
+															size="icon"
+															onClick={() => {
+																const input = document.querySelector(
+																	'input[placeholder*="Enter a label"]',
+																) as HTMLInputElement;
+																const label = input.value.trim();
+																if (label) {
+																	field.onChange([...(field.value || []), label]);
+																	input.value = "";
 																}
 															}}
-														/>
-													</FormControl>
-													<Button
-														type="button"
-														variant="outline"
-														size="icon"
-														onClick={() => {
-															const input = document.querySelector(
-																'input[placeholder*="Enter a label"]',
-															) as HTMLInputElement;
-															const label = input.value.trim();
-															if (label) {
-																field.onChange([...(field.value || []), label]);
-																input.value = "";
-															}
-														}}
-													>
-														<Plus className="size-4" />
-													</Button>
-												</div>
-												<FormMessage />
-											</FormItem>
-										)}
-									/>
+														>
+															<Plus className="size-4" />
+														</Button>
+													</div>
+													<FormMessage />
+												</FormItem>
+											)}
+										/>
+									)}
 									<FormField
 										control={form.control}
 										name="previewLimit"
@@ -496,52 +662,60 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 								</div>
 
 								<div className="grid gap-4 lg:grid-cols-2">
-									<FormField
-										control={form.control}
-										name="previewRequireCollaboratorPermissions"
-										render={({ field }) => (
-											<FormItem className="flex flex-row items-center justify-between p-3 mt-4 border rounded-lg shadow-xs col-span-2">
-												<div className="space-y-0.5">
-													{data?.sourceType === "gitlab" ? (
-														<>
-															<FormLabel>Require Member Access</FormLabel>
-															<FormDescription>
-																Require a minimum GitLab access level to trigger
-																preview deployments. Valid roles are:
-																<ul>
-																	<li>Owner</li>
-																	<li>Maintainer</li>
-																	<li>Developer</li>
-																</ul>
-															</FormDescription>
-														</>
-													) : (
-														<>
-															<FormLabel>
-																Require Collaborator Permissions
-															</FormLabel>
-															<FormDescription>
-																Require collaborator permissions to preview
-																deployments, valid roles are:
-																<ul>
-																	<li>Admin</li>
-																	<li>Maintain</li>
-																	<li>Write</li>
-																</ul>
-															</FormDescription>
-														</>
-													)}
-												</div>
-												<FormControl>
-													<Switch
-														checked={field.value}
-														onCheckedChange={field.onChange}
-													/>
-												</FormControl>
-											</FormItem>
-										)}
-									/>
+									<div className="col-span-2">
+										<SnapvisorPreviewSettingSection applicationId={applicationId} />
+									</div>
 								</div>
+
+								{!isDockerImage && (
+									<div className="grid gap-4 lg:grid-cols-2">
+										<FormField
+											control={form.control}
+											name="previewRequireCollaboratorPermissions"
+											render={({ field }) => (
+												<FormItem className="flex flex-row items-center justify-between p-3 mt-4 border rounded-lg shadow-xs col-span-2">
+													<div className="space-y-0.5">
+														{data?.sourceType === "gitlab" ? (
+															<>
+																<FormLabel>Require Member Access</FormLabel>
+																<FormDescription>
+																	Require a minimum GitLab access level to trigger
+																	preview deployments. Valid roles are:
+																	<ul>
+																		<li>Owner</li>
+																		<li>Maintainer</li>
+																		<li>Developer</li>
+																	</ul>
+																</FormDescription>
+															</>
+														) : (
+															<>
+																<FormLabel>
+																	Require Collaborator Permissions
+																</FormLabel>
+																<FormDescription>
+																	Require collaborator permissions to preview
+																	deployments, valid roles are:
+																	<ul>
+																		<li>Admin</li>
+																		<li>Maintain</li>
+																		<li>Write</li>
+																	</ul>
+																</FormDescription>
+															</>
+														)}
+													</div>
+													<FormControl>
+														<Switch
+															checked={field.value}
+															onCheckedChange={field.onChange}
+														/>
+													</FormControl>
+												</FormItem>
+											)}
+										/>
+									</div>
+								)}
 
 								<FormField
 									control={form.control}

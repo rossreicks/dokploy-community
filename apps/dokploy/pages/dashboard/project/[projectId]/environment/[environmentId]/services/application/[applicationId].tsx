@@ -38,6 +38,7 @@ import { ShowVolumeBackups } from "@/components/dashboard/application/volume-bac
 import { DeleteService } from "@/components/dashboard/compose/delete-service";
 import { ContainerFreeMonitoring } from "@/components/dashboard/monitoring/free/container/show-free-container-monitoring";
 import { ContainerPaidMonitoring } from "@/components/dashboard/monitoring/paid/container/show-paid-container-monitoring";
+import { UptimelyServicePanel } from "@/components/dashboard/monitoring/uptimely/uptimely-service-panel";
 import { AssignNetworks } from "@/components/dashboard/networks/assign-networks";
 import { TransferService } from "@/components/dashboard/shared/transfer-service";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
@@ -60,7 +61,7 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { UseKeyboardNav } from "@/hooks/use-keyboard-nav";
-import { supportsPreviewDeployments } from "@/lib/preview-deployments";
+import { supportsApplicationPreviewDeployments } from "@/lib/preview-deployments";
 import { appRouter } from "@/server/api/root";
 import { api } from "@/utils/api";
 import { useWhitelabeling } from "@/utils/hooks/use-whitelabeling";
@@ -255,7 +256,7 @@ const Service = (
 												</TabsTrigger>
 											)}
 											{permissions?.deployment.read &&
-												supportsPreviewDeployments(data?.sourceType) && (
+												supportsApplicationPreviewDeployments(data?.sourceType) && (
 													<TabsTrigger value="preview-deployments">
 														Preview Deployments
 													</TabsTrigger>
@@ -301,7 +302,11 @@ const Service = (
 
 									{permissions?.monitoring.read && (
 										<TabsContent value="monitoring">
-											<div className="pt-2.5">
+											<div className="pt-2.5 flex flex-col gap-4">
+												<UptimelyServicePanel
+													serviceType="application"
+													serviceId={applicationId}
+												/>
 												<div className="flex flex-col gap-4 border rounded-lg p-6">
 													{data?.serverId && isCloud ? (
 														<ContainerPaidMonitoring
@@ -394,7 +399,7 @@ const Service = (
 										</TabsContent>
 									)}
 									{permissions?.deployment.read &&
-										supportsPreviewDeployments(data?.sourceType) && (
+										supportsApplicationPreviewDeployments(data?.sourceType) && (
 											<TabsContent
 												value="preview-deployments"
 												className="w-full"

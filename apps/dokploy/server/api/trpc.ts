@@ -9,6 +9,7 @@
 
 // import { getServerAuthSession } from "@/server/auth";
 import { db } from "@dokploy/server/db";
+import { server as serverTable } from "@dokploy/server/db/schema";
 import { hasValidLicense } from "@dokploy/server/index";
 import type { statements } from "@dokploy/server/lib/access-control";
 import { validateRequest } from "@dokploy/server/lib/auth";
@@ -17,8 +18,15 @@ import type { OpenApiMeta } from "@dokploy/trpc-openapi";
 import { initTRPC, TRPCError } from "@trpc/server";
 import type { CreateNextContextOptions } from "@trpc/server/adapters/next";
 import type { Session, User } from "better-auth";
+import { and, eq } from "drizzle-orm";
 import superjson from "superjson";
 import { ZodError } from "zod";
+import {
+	classifyRemoteUnreachable,
+	findTcpConnectFailure,
+	mapAsyncIterableErrors,
+	type RemoteEndpoint,
+} from "./remote-unreachable";
 
 type Resource = keyof typeof statements;
 type ActionOf<R extends Resource> = (typeof statements)[R][number];
@@ -150,13 +158,128 @@ export const createTRPCRouter = t.router;
 export const createCallerFactory = t.createCallerFactory;
 
 /**
+ * Looks up whether a failed TCP connect went to a configured remote server's
+ * SSH port (a non-default port such as 2222). Never throws: on any lookup
+ * failure the original error is left to propagate untouched.
+ */
+const findConfiguredSshEndpoint = async (
+	error: unknown,
+): Promise<RemoteEndpoint | null> => {
+	const failure = findTcpConnectFailure(error);
+	if (!failure) return null;
+	try {
+		const row = await db.query.server.findFirst({
+			columns: { serverId: true },
+			where: and(
+				eq(serverTable.ipAddress, failure.host),
+				eq(serverTable.port, failure.port),
+			),
+		});
+		return row ? { host: failure.host, port: failure.port } : null;
+	} catch {
+		return null;
+	}
+};
+
+/**
+ * Turns a failure caused by an unreachable remote server (host down, network
+ * unreachable, SSH refused or timed out) into SERVICE_UNAVAILABLE with an
+ * actionable message, or returns null when `error` is anything else. Only
+ * unexpected failures are inspected: deliberate TRPCErrors (NOT_FOUND,
+ * UNAUTHORIZED, ...) are never remapped.
+ */
+const toServiceUnavailable = async (
+	path: string,
+	error: unknown,
+): Promise<TRPCError | null> => {
+	if (error instanceof TRPCError && error.code !== "INTERNAL_SERVER_ERROR") {
+		return null;
+	}
+
+	let unreachable = classifyRemoteUnreachable(error);
+	if (!unreachable) {
+		const endpoint = await findConfiguredSshEndpoint(error);
+		if (endpoint) {
+			unreachable = classifyRemoteUnreachable(error, {
+				sshEndpoints: [endpoint],
+			});
+		}
+	}
+	if (!unreachable) return null;
+
+	// No longer reaches Sentry, so keep one line in the logs for operators.
+	console.warn(
+		`[trpc] ${path}: remote server unreachable (${unreachable.host ?? "unknown host"}${
+			unreachable.port ? `:${unreachable.port}` : ""
+		}, ${unreachable.code})`,
+	);
+
+	return new TRPCError({
+		code: "SERVICE_UNAVAILABLE",
+		message: unreachable.message,
+		cause: error instanceof TRPCError ? (error.cause ?? error) : error,
+	});
+};
+
+const isAsyncIterable = (value: unknown): value is AsyncIterable<unknown> =>
+	typeof value === "object" && value !== null && Symbol.asyncIterator in value;
+
+/**
+ * An unreachable remote server is an environment condition, not a Dokploy bug.
+ * Without this the raw socket error (`connect EHOSTUNREACH 1.2.3.4:22`) escapes
+ * as an INTERNAL_SERVER_ERROR, which is shown verbatim to the user and reported
+ * to Sentry. Convert it to SERVICE_UNAVAILABLE with an actionable message.
+ *
+ * Applied to the base procedure, so every procedure inherits it.
+ *
+ * A subscription resolver returns its async iterable straight away, so a
+ * failure while it is being iterated never shows up in `next()`'s result.
+ * Async iterable (generator) subscriptions are wrapped so the same mapping
+ * applies to errors thrown mid-stream. Wrapping is limited to subscriptions,
+ * where the data is known to be a stream and not a plain object.
+ *
+ * Observable subscriptions are not mapped: none calls `emit.error` today (they
+ * report failures through `emit.next`). A future route that does must handle
+ * unreachable-server errors itself.
+ */
+export const remoteUnreachableMiddleware = t.middleware(
+	async ({ path, type, next }) => {
+		const result = await next();
+
+		if (!result.ok) {
+			if (result.error.code !== "INTERNAL_SERVER_ERROR") return result;
+			const mapped = await toServiceUnavailable(path, result.error);
+			if (mapped) throw mapped;
+			return result;
+		}
+
+		if (type !== "subscription") return result;
+		const mapStreamError = async (error: unknown) =>
+			(await toServiceUnavailable(path, error)) ?? error;
+		if (isAsyncIterable(result.data)) {
+			return {
+				...result,
+				data: mapAsyncIterableErrors(result.data, mapStreamError),
+			};
+		}
+		return result;
+	},
+);
+
+/**
+ * Base procedure. Every procedure below derives from it, so the middleware
+ * above runs for all of them, outermost.
+ */
+const baseProcedure = t.procedure.use(remoteUnreachableMiddleware);
+
+/**
  * Public (unauthenticated) procedure
  *
  * This is the base piece you use to build new queries and mutations on your tRPC API. It does not
  * guarantee that a user querying is authorized, but you can still access user session data if they
  * are logged in.
  */
-export const publicProcedure = t.procedure;
+export const publicProcedure = baseProcedure;
 
 /**
  * Protected (authenticated) procedure
@@ -166,7 +289,7 @@ export const publicProcedure = t.procedure;
  *
  * @see https://trpc.io/docs/procedures
  */
-export const protectedProcedure = t.procedure.use(({ ctx, next }) => {
+export const protectedProcedure = baseProcedure.use(({ ctx, next }) => {
 	if (!ctx.session || !ctx.user) {
 		throw new TRPCError({ code: "UNAUTHORIZED" });
 	}
@@ -180,7 +303,7 @@ export const protectedProcedure = t.procedure.use(({ ctx, next }) => {
 	});
 });
 
-export const cliProcedure = t.procedure.use(({ ctx, next }) => {
+export const cliProcedure = baseProcedure.use(({ ctx, next }) => {
 	if (
 		!ctx.session ||
 		!ctx.user ||
@@ -198,7 +321,7 @@ export const cliProcedure = t.procedure.use(({ ctx, next }) => {
 	});
 });
 
-export const adminProcedure = t.procedure.use(({ ctx, next }) => {
+export const adminProcedure = baseProcedure.use(({ ctx, next }) => {
 	if (
 		!ctx.session ||
 		!ctx.user ||
@@ -221,7 +344,7 @@ export const adminProcedure = t.procedure.use(({ ctx, next }) => {
  * Does NOT call the license server on every request; full validation (haveValidLicenseKey)
  * is used in the UI gate and when activating/validating keys.
  */
-export const enterpriseProcedure = t.procedure.use(async ({ ctx, next }) => {
+export const enterpriseProcedure = baseProcedure.use(async ({ ctx, next }) => {
 	if (
 		!ctx.session ||
 		!ctx.user ||

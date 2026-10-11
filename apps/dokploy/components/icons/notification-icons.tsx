@@ -1,3 +1,4 @@
+import { NotiflyLogo, SendlyLogo } from "@/components/icons/product-logos";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -321,3 +322,13 @@ export const ResendIcon = ({ className }: Props) => {
 		</svg>
 	);
 };
+
+/** Official Sendly brand mark (see `product-logos.tsx` for its source). */
+export const SendlyIcon = ({ className }: Props) => (
+	<SendlyLogo className={cn("size-8", className)} />
+);
+
+/** Official Notifly brand mark (see `product-logos.tsx` for its source). */
+export const NotiflyIcon = ({ className }: Props) => (
+	<NotiflyLogo className={cn("size-8", className)} />
+);

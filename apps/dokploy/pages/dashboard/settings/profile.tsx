@@ -1,8 +1,13 @@
-import { validateRequest } from "@dokploy/server";
+import {
+	getWebServerSettings,
+	IS_CLOUD,
+	validateRequest,
+} from "@dokploy/server";
 import { createServerSideHelpers } from "@trpc/react-query/server";
 import type { GetServerSidePropsContext } from "next";
 import type { ReactElement } from "react";
 import superjson from "superjson";
+import type { EnabledSocialProviders } from "@/components/auth/social-login";
 import { ShowApiKeys } from "@/components/dashboard/settings/api/show-api-keys";
 import { LinkingAccount } from "@/components/dashboard/settings/linking-account/linking-account";
 import { McpServer } from "@/components/dashboard/settings/mcp/mcp-server";
@@ -11,15 +16,19 @@ import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { appRouter } from "@/server/api/root";
 import { api } from "@/utils/api";
 
-const Page = () => {
+const Page = ({
+	socialProviders = {},
+}: {
+	socialProviders?: EnabledSocialProviders;
+}) => {
 	const { data: permissions } = api.user.getPermissions.useQuery();
-	const { data: isCloud } = api.settings.isCloud.useQuery();
+	const hasSocialProvider = socialProviders.github || socialProviders.google;
 
 	return (
 		<div className="w-full">
 			<div className="h-full rounded-xl max-w-5xl mx-auto flex flex-col gap-4">
 				<ProfileForm />
-				<LinkingAccount />
+				{hasSocialProvider && <LinkingAccount providers={socialProviders} />}
 				{permissions?.api.read && <ShowApiKeys />}
 				<McpServer />
 			</div>
@@ -62,9 +71,25 @@ export async function getServerSideProps(
 		};
 	}
 
+	// Enforced SSO blocks social sign-in and linking, so offer neither.
+	const ssoEnforced =
+		!IS_CLOUD && Boolean((await getWebServerSettings())?.enforceSSO);
+
 	return {
 		props: {
 			trpcState: helpers.dehydrate(),
+			socialProviders: {
+				github:
+					!ssoEnforced &&
+					Boolean(
+						process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET,
+					),
+				google:
+					!ssoEnforced &&
+					Boolean(
+						process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET,
+					),
+			},
 		},
 	};
 }
