@@ -1,4 +1,5 @@
 import {
+	backgroundJob,
 	CLEANUP_CRON_JOB,
 	checkGPUStatus,
 	checkPortInUse,
@@ -21,19 +22,21 @@ import {
 	getWebServerSettings,
 	IS_CLOUD,
 	isResponseCompressionEnabled,
+	isTraefikDashboardPortEnabled,
 	parseRawConfig,
 	paths,
 	prepareEnvironmentVariables,
-	processLogs,
 	readConfig,
 	readConfigInPath,
 	readDirectory,
 	readEnvironmentVariables,
 	readMainConfig,
 	readMonitoringConfig,
+	readMonitoringStats,
 	readPorts,
 	recreateDirectory,
 	reloadDockerResource,
+	runBackgroundJob,
 	sendDockerCleanupNotifications,
 	setupGPUSupport,
 	spawnAsync,
@@ -273,7 +276,11 @@ export const settingsRouter = createTRPCRouter({
 				ctx.session?.activeOrganizationId,
 			);
 			// Execute cleanup in background and return immediately to avoid gateway timeouts
-			void cleanupAll(input?.serverId);
+			void runBackgroundJob(
+				"settings.cleanAll background",
+				() => cleanupAll(input?.serverId),
+				{ serverId: input?.serverId ?? null },
+			);
 			await audit(ctx, {
 				action: "delete",
 				resourceType: "settings",
@@ -403,15 +410,23 @@ export const settingsRouter = createTRPCRouter({
 							type: "server",
 						});
 					} else {
-						scheduleJob(server.serverId, CLEANUP_CRON_JOB, async () => {
-							console.log(
-								`Docker Cleanup ${new Date().toLocaleString()}] Running...`,
-							);
+						scheduleJob(
+							server.serverId,
+							CLEANUP_CRON_JOB,
+							backgroundJob(
+								"Docker cleanup",
+								async () => {
+									console.log(
+										`Docker Cleanup ${new Date().toLocaleString()}] Running...`,
+									);
 
-							await cleanupAll(server.serverId);
+									await cleanupAll(server.serverId);
 
-							await sendDockerCleanupNotifications(server.organizationId);
-						});
+									await sendDockerCleanupNotifications(server.organizationId);
+								},
+								{ serverId: server.serverId },
+							),
+						);
 					}
 				} else {
 					if (IS_CLOUD) {
@@ -431,17 +446,20 @@ export const settingsRouter = createTRPCRouter({
 				});
 
 				if (settingsUpdated?.enableDockerCleanup) {
-					scheduleJob("docker-cleanup", CLEANUP_CRON_JOB, async () => {
-						console.log(
-							`Docker Cleanup ${new Date().toLocaleString()}] Running...`,
-						);
+					const organizationId = ctx.session.activeOrganizationId;
+					scheduleJob(
+						"docker-cleanup",
+						CLEANUP_CRON_JOB,
+						backgroundJob("Docker cleanup", async () => {
+							console.log(
+								`Docker Cleanup ${new Date().toLocaleString()}] Running...`,
+							);
 
-						await cleanupAll();
+							await cleanupAll();
 
-						await sendDockerCleanupNotifications(
-							ctx.session.activeOrganizationId,
-						);
-					});
+							await sendDockerCleanupNotifications(organizationId);
+						}),
+					);
 				} else {
 					const currentJob = scheduledJobs["docker-cleanup"];
 					currentJob?.cancel();
@@ -639,14 +657,16 @@ export const settingsRouter = createTRPCRouter({
 
 		const data = await getUpdateData(packageInfo.version);
 		if (data.updateAvailable) {
-			void spawnAsync("docker", [
-				"service",
-				"update",
-				"--force",
-				"--image",
-				getDokployUpdateImage(),
-				"dokploy",
-			]);
+			void runBackgroundJob("settings.updateServer background", () =>
+				spawnAsync("docker", [
+					"service",
+					"update",
+					"--force",
+					"--image",
+					getDokployUpdateImage(),
+					"dokploy",
+				]),
+			);
 			await audit(ctx, {
 				action: "update",
 				resourceType: "settings",
@@ -870,8 +890,7 @@ export const settingsRouter = createTRPCRouter({
 				input?.serverId,
 				ctx.session?.activeOrganizationId,
 			);
-			const ports = await readPorts("dokploy-traefik", input?.serverId);
-			return ports.some((port) => port.targetPort === 8080);
+			return await isTraefikDashboardPortEnabled(input?.serverId);
 		}),
 
 	readStatsLogs: protectedProcedure
@@ -893,6 +912,7 @@ export const settingsRouter = createTRPCRouter({
 			}
 			const rawConfig = await readMonitoringConfig(
 				!!input.dateRange?.start && !!input.dateRange?.end,
+				input.dateRange,
 			);
 
 			const parsedConfig = parseRawConfig(
@@ -931,11 +951,7 @@ export const settingsRouter = createTRPCRouter({
 			if (IS_CLOUD) {
 				return [];
 			}
-			const rawConfig = await readMonitoringConfig(
-				!!input?.dateRange?.start || !!input?.dateRange?.end,
-			);
-			const processedLogs = processLogs(rawConfig as string, input?.dateRange);
-			return processedLogs || [];
+			return (await readMonitoringStats(input?.dateRange)) || [];
 		}),
 	haveActivateRequests: protectedProcedure.query(async () => {
 		if (IS_CLOUD) {

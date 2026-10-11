@@ -1,5 +1,12 @@
 import { VALID_BRANCH_REGEX } from "@dokploy/server/utils/git-branch-validation";
 import { VALID_GIT_URL_REGEX } from "@dokploy/server/utils/git-url-validation";
+import {
+	getPreviewImageTemplateError,
+} from "@dokploy/server/utils/preview-image";
+import {
+	isValidPreviewWildcard,
+	PREVIEW_WILDCARD_GUIDANCE,
+} from "@dokploy/server/utils/preview-wildcard";
 import { relations } from "drizzle-orm";
 import {
 	bigint,
@@ -102,6 +109,12 @@ export const applications = pgTable("application", {
 	previewBuildSecrets: encryptedText("previewBuildSecrets"),
 	previewLabels: text("previewLabels").array(),
 	previewWildcard: text("previewWildcard"),
+	/**
+	 * Fork column. Image template for previews of a Docker-image application
+	 * (no repository to clone), e.g. `ghcr.io/acme/app:pr-${{preview.prNumber}}`.
+	 * `null` means previews are not available for the application.
+	 */
+	previewDockerImage: text("previewDockerImage"),
 	previewPort: integer("previewPort").default(3000),
 	previewHttps: boolean("previewHttps").notNull().default(false),
 	previewPath: text("previewPath").default("/"),
@@ -117,6 +130,12 @@ export const applications = pgTable("application", {
 	previewRequireCollaboratorPermissions: boolean(
 		"previewRequireCollaboratorPermissions",
 	).default(true),
+	/**
+	 * Fork column (Snapvisor integration). Name of the Snapvisor project that
+	 * receives this application's preview-deployment builds; `null` means
+	 * visual testing is off. See services/snapvisor.ts.
+	 */
+	snapvisorProjectName: text("snapvisorProjectName"),
 	rollbackActive: boolean("rollbackActive").default(false),
 	buildArgs: encryptedText("buildArgs"),
 	buildSecrets: encryptedText("buildSecrets"),
@@ -378,7 +397,20 @@ const createSchema = createInsertSchema(applications, {
 	previewEnv: z.string().optional(),
 	previewBuildArgs: z.string().optional(),
 	previewBuildSecrets: z.string().optional(),
-	previewWildcard: z.string().optional(),
+	previewWildcard: z
+		.string()
+		.refine(isValidPreviewWildcard, { message: PREVIEW_WILDCARD_GUIDANCE })
+		.optional(),
+	previewDockerImage: z
+		.string()
+		.superRefine((value, ctx) => {
+			const message = getPreviewImageTemplateError(value);
+			if (message) {
+				ctx.addIssue({ code: "custom", message });
+			}
+		})
+		.nullable()
+		.optional(),
 	previewLimit: z.number().optional(),
 	previewHttps: z.boolean().optional(),
 	previewPath: z.string().optional(),

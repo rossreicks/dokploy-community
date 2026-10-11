@@ -1,10 +1,12 @@
 import {
+	Container,
 	ExternalLink,
 	FileText,
 	GitPullRequest,
 	Hammer,
 	Loader2,
 	PenSquare,
+	RefreshCw,
 	RocketIcon,
 	Trash2,
 } from "lucide-react";
@@ -15,6 +17,7 @@ import {
 	GithubIcon,
 	GitlabIcon,
 } from "@/components/icons/data-tools-icons";
+import { SnapvisorLogo } from "@/components/icons/product-logos";
 import { AlertBlock } from "@/components/shared/alert-block";
 import { DateTooltip } from "@/components/shared/date-tooltip";
 import { DialogAction } from "@/components/shared/dialog-action";
@@ -39,8 +42,115 @@ import { api } from "@/utils/api";
 import { ShowModalLogs } from "../../settings/web-server/show-modal-logs";
 import { ShowDeploymentsModal } from "../deployments/show-deployments-modal";
 import { AddPreviewDomain } from "./add-preview-domain";
+import { BuildDockerImagePreview } from "./build-docker-image-preview";
 import { BuildPreviewDeployment } from "./build-preview-deployment";
 import { ShowPreviewSettings } from "./show-preview-settings";
+
+/** Snapvisor `Build.status` → the label/tone shown on the preview card. */
+const SNAPVISOR_STATUS_PRESENTATION: Record<
+	string,
+	{ label: string; className: string }
+> = {
+	pending: { label: "Pending", className: "text-muted-foreground" },
+	progress: { label: "Pending", className: "text-muted-foreground" },
+	"no-changes": { label: "No changes", className: "text-green-600" },
+	"changes-detected": { label: "Changes detected", className: "text-yellow-600" },
+	accepted: { label: "Approved", className: "text-green-600" },
+	rejected: { label: "Rejected", className: "text-red-600" },
+	error: { label: "Error", className: "text-red-600" },
+	aborted: { label: "Error", className: "text-red-600" },
+	expired: { label: "Expired", className: "text-muted-foreground" },
+};
+
+/**
+ * Build statuses that can never change again on their own: a review outcome
+ * (accepted/rejected) or a finished/failed run (no-changes/error/aborted/
+ * expired). Polling stops once one of these is reached; a new commit gets a
+ * new build anyway, registered by the next preview deploy.
+ */
+const SNAPVISOR_TERMINAL_STATUSES = new Set([
+	"accepted",
+	"rejected",
+	"no-changes",
+	"error",
+	"aborted",
+	"expired",
+]);
+
+/**
+ * Snapvisor visual-diff badge for one preview deployment. Only rendered when
+ * the application has a Snapvisor project linked (`show-preview-settings.tsx`);
+ * polls the stored build linkage and offers a manual refresh + deep link.
+ */
+const SnapvisorPreviewBadge = ({
+	previewDeploymentId,
+}: {
+	previewDeploymentId: string;
+}) => {
+	const { data, isPending } = api.snapvisor.previewBuild.useQuery(
+		{ previewDeploymentId },
+		{
+			refetchInterval: (query) => {
+				const status = query.state.data?.buildStatus;
+				return status && SNAPVISOR_TERMINAL_STATUSES.has(status)
+					? false
+					: 15_000;
+			},
+		},
+	);
+	const { mutateAsync: refresh, isPending: isRefreshing } =
+		api.snapvisor.refreshPreviewBuild.useMutation();
+	const utils = api.useUtils();
+
+	if (isPending || !data) return null;
+
+	const presentation = data.buildStatus
+		? SNAPVISOR_STATUS_PRESENTATION[data.buildStatus]
+		: null;
+
+	return (
+		<div className="flex items-center gap-1">
+			<Badge variant="outline" className="gap-1.5">
+				<SnapvisorLogo className="size-3.5" />
+				<span className={presentation?.className}>
+					{data.buildId ? (presentation?.label ?? "Unknown") : "Not registered"}
+				</span>
+			</Badge>
+			<Button
+				variant="ghost"
+				size="icon"
+				className="size-6"
+				isLoading={isRefreshing}
+				aria-label="Refresh Snapvisor status"
+				onClick={async () => {
+					await refresh({ previewDeploymentId })
+						.then(async () => {
+							await utils.snapvisor.previewBuild.invalidate({
+								previewDeploymentId,
+							});
+						})
+						.catch((error) => {
+							toast.error("Error refreshing Snapvisor status", {
+								description: error.message,
+							});
+						});
+				}}
+			>
+				<RefreshCw className="size-3" />
+			</Button>
+			{data.reviewUrl && (
+				<a
+					href={data.reviewUrl}
+					target="_blank"
+					rel="noopener noreferrer"
+					className="text-xs text-blue-500 hover:underline"
+				>
+					Review in Snapvisor
+				</a>
+			)}
+		</div>
+	);
+};
 
 interface Props {
 	applicationId: string;
@@ -50,6 +160,7 @@ export const ShowPreviewDeployments = ({ applicationId }: Props) => {
 	const { data } = api.application.one.useQuery({ applicationId });
 	const isGitlab = data?.sourceType === "gitlab";
 	const isGitea = data?.sourceType === "gitea";
+	const isDockerImage = data?.sourceType === "docker";
 	const ChangeRequestIcon = isGitlab
 		? GitlabIcon
 		: isGitea
@@ -97,12 +208,25 @@ export const ShowPreviewDeployments = ({ applicationId }: Props) => {
 				</div>
 				{data?.isPreviewDeploymentsActive && (
 					<div className="flex items-center gap-2">
-						<BuildPreviewDeployment resource={data}>
-							<Button variant="outline" className="gap-2">
-								<GitPullRequest className="size-4" />
-								Build {changeRequestLabel}
-							</Button>
-						</BuildPreviewDeployment>
+						{isDockerImage ? (
+							<BuildDockerImagePreview
+								applicationId={applicationId}
+								previewDockerImage={data.previewDockerImage}
+								isPreviewDeploymentsActive={data.isPreviewDeploymentsActive}
+							>
+								<Button variant="outline" className="gap-2">
+									<Container className="size-4" />
+									Deploy image preview
+								</Button>
+							</BuildDockerImagePreview>
+						) : (
+							<BuildPreviewDeployment resource={data}>
+								<Button variant="outline" className="gap-2">
+									<GitPullRequest className="size-4" />
+									Build {changeRequestLabel}
+								</Button>
+							</BuildPreviewDeployment>
+						)}
 						<ShowPreviewSettings applicationId={applicationId} />
 					</div>
 				)}
@@ -111,12 +235,28 @@ export const ShowPreviewDeployments = ({ applicationId }: Props) => {
 				{data?.isPreviewDeploymentsActive ? (
 					<>
 						<div className="flex flex-col gap-2 text-sm">
-							<span>
-								Preview deployments let you test your application before you
-								deploy it to production. Each {changeRequestLabel.toLowerCase()}{" "}
-								gets a new deployment.
-							</span>
+							{isDockerImage ? (
+								<span>
+									Preview deployments let you test an image before you deploy it
+									to production. Each preview pulls the image from your preview
+									image template, filled with the pull request number or tag you
+									deploy it for. Deploy it again to pull a re-pushed image.
+								</span>
+							) : (
+								<span>
+									Preview deployments let you test your application before you
+									deploy it to production. Each{" "}
+									{changeRequestLabel.toLowerCase()} gets a new deployment.
+								</span>
+							)}
 						</div>
+						{isDockerImage && !data?.previewDockerImage && (
+							<AlertBlock type="warning">
+								Set a preview image template in the preview settings (for example{" "}
+								<code>{"ghcr.io/acme/app:pr-${{preview.prNumber}}"}</code>) to
+								create previews for this Docker image application.
+							</AlertBlock>
+						)}
 						{isGitea && (
 							<AlertBlock type="info">
 								<strong>Gitea / Forgejo:</strong> preview deployments are driven
@@ -167,7 +307,11 @@ export const ShowPreviewDeployments = ({ applicationId }: Props) => {
 											<div className="p-4">
 												<div className="flex items-start justify-between mb-3">
 													<div className="flex items-start gap-3">
-														<GitPullRequest className="size-5 text-muted-foreground mt-1 shrink-0" />
+														{isDockerImage ? (
+															<Container className="size-5 text-muted-foreground mt-1 shrink-0" />
+														) : (
+															<GitPullRequest className="size-5 text-muted-foreground mt-1 shrink-0" />
+														)}
 														<div>
 															<div className="font-medium text-sm">
 																{deployment.pullRequestTitle}
@@ -187,6 +331,11 @@ export const ShowPreviewDeployments = ({ applicationId }: Props) => {
 												</div>
 
 												<div className="pl-8 space-y-3">
+													{data?.snapvisorProjectName && (
+														<SnapvisorPreviewBadge
+															previewDeploymentId={deployment.previewDeploymentId}
+														/>
+													)}
 													<div className="relative grow">
 														<Input
 															value={deploymentUrl}
@@ -200,17 +349,19 @@ export const ShowPreviewDeployments = ({ applicationId }: Props) => {
 													</div>
 
 													<div className="flex gap-2 opacity-80 group-hover:opacity-100 transition-opacity">
-														<Button
-															variant="outline"
-															size="sm"
-															className="gap-2"
-															onClick={() =>
-																window.open(deployment.pullRequestURL, "_blank")
-															}
-														>
-															<ChangeRequestIcon className="size-4" />
-															{changeRequestLabel}
-														</Button>
+														{!isDockerImage && (
+															<Button
+																variant="outline"
+																size="sm"
+																className="gap-2"
+																onClick={() =>
+																	window.open(deployment.pullRequestURL, "_blank")
+																}
+															>
+																<ChangeRequestIcon className="size-4" />
+																{changeRequestLabel}
+															</Button>
+														)}
 														<ShowModalLogs
 															appName={deployment.appName}
 															serverId={data?.serverId || ""}
@@ -242,7 +393,11 @@ export const ShowPreviewDeployments = ({ applicationId }: Props) => {
 
 														<DialogAction
 															title="Rebuild Preview Deployment"
-															description="Are you sure you want to rebuild this preview deployment?"
+															description={
+																isDockerImage
+																	? "Pull the preview image again and redeploy this preview?"
+																	: "Are you sure you want to rebuild this preview deployment?"
+															}
 															type="default"
 															onClick={async () => {
 																await redeployPreviewDeployment({
@@ -282,8 +437,9 @@ export const ShowPreviewDeployments = ({ applicationId }: Props) => {
 																				className="z-60"
 																			>
 																				<p>
-																					Rebuild the preview deployment without
-																					downloading new code
+																					{isDockerImage
+																						? "Pull the preview image again and redeploy it"
+																						: "Rebuild the preview deployment without downloading new code"}
 																				</p>
 																			</TooltipContent>
 																		</TooltipPrimitive.Portal>

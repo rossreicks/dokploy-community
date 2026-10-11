@@ -9,16 +9,25 @@ import { TRPCError } from "@trpc/server";
 import { and, desc, eq } from "drizzle-orm";
 import type { z } from "zod";
 import { generatePassword } from "../templates";
-import { removeComposeDirectory } from "../utils/filesystem/directory";
 import { removeService } from "../utils/docker/utils";
-import { removeDirectoryCode } from "../utils/filesystem/directory";
+import {
+	removeComposeDirectory,
+	removeDirectoryCode,
+} from "../utils/filesystem/directory";
+import { getRemotePublicIp, isPrivateIp } from "../utils/ip";
+import {
+	hasPreviewTemplateVariable,
+	PREVIEW_WILDCARD_GUIDANCE,
+} from "../utils/preview-wildcard";
 import {
 	ExecError,
 	execAsync,
 	execAsyncRemote,
 } from "../utils/process/execAsync";
+import { buildPreviewHeadRef } from "../utils/providers/head-ref";
 import { removeTraefikConfig } from "../utils/traefik/application";
 import { manageDomain } from "../utils/traefik/domain";
+import { getPublicIpWithFallback } from "../wss/utils";
 import { findApplicationById } from "./application";
 import { findComposeById, runComposeBuild } from "./compose";
 import {
@@ -27,8 +36,6 @@ import {
 	updateDeploymentStatus,
 } from "./deployment";
 import { createDomain } from "./domain";
-import { getRemotePublicIp, isPrivateIp } from "../utils/ip";
-import { getPublicIpWithFallback } from "../wss/utils";
 import { getIssueComment } from "./github";
 import {
 	createPreviewComment,
@@ -196,7 +203,10 @@ export const interpolateSubdomainTemplate = (
 ): string => {
 	return template
 		.replace(/\$\{appName\}/g, vars.appName)
-		.replace(/\$\{prNumber\}/g, vars.prNumber)
+		// Hostnames are case-insensitive and Traefik/Let's Encrypt want them in
+		// lower case; a Docker-image preview identifier may hold capitals (image
+		// tags are case-sensitive, so only the host is lowered).
+		.replace(/\$\{prNumber\}/g, vars.prNumber.toLowerCase())
 		.replace(/\$\{branchName\}/g, slugify(vars.branchName))
 		.replace(/\$\{uniqueId\}/g, vars.uniqueId);
 };
@@ -215,10 +225,7 @@ export const createPreviewDeployment = async (
 	const uniqueId = generatePassword(6);
 	const domainTemplate = application.previewWildcard || "*.sslip.io";
 
-	const hasIdentifier =
-		domainTemplate.includes("${prNumber}") ||
-		domainTemplate.includes("${branchName}") ||
-		domainTemplate.includes("${uniqueId}");
+	const hasIdentifier = hasPreviewTemplateVariable(domainTemplate);
 
 	const appName: string = `preview-${application.appName}-${uniqueId}`;
 	let generateDomain: string;
@@ -238,7 +245,7 @@ export const createPreviewDeployment = async (
 				application.environment.project.organizationId,
 			),
 		});
-		generateDomain = await generateWildcardDomain(
+		generateDomain = await generatePreviewWildcardDomain(
 			domainTemplate,
 			appName,
 			application.server?.ipAddress || "",
@@ -381,7 +388,7 @@ export const findPreviewDeploymentByApplicationId = async (
 	return previewDeploymentResult;
 };
 
-const generateWildcardDomain = async (
+export const generatePreviewWildcardDomain = async (
 	baseDomain: string,
 	appName: string,
 	serverIp: string,
@@ -389,7 +396,10 @@ const generateWildcardDomain = async (
 	serverId?: string,
 ): Promise<string> => {
 	if (!baseDomain.startsWith("*.")) {
-		throw new Error('The base domain must start with "*."');
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: `Invalid preview domain "${baseDomain}". ${PREVIEW_WILDCARD_GUIDANCE}`,
+		});
 	}
 	const hash = `${appName}`;
 	if (baseDomain.includes("sslip.io")) {
@@ -656,10 +666,7 @@ export const createComposePreview = async (
 	// domains (one Traefik host per service). Each service gets a distinct host so
 	// multi-service stacks route correctly.
 	const domainTemplate = compose.previewWildcard || "*.sslip.io";
-	const hasIdentifier =
-		domainTemplate.includes("${prNumber}") ||
-		domainTemplate.includes("${branchName}") ||
-		domainTemplate.includes("${uniqueId}");
+	const hasIdentifier = hasPreviewTemplateVariable(domainTemplate);
 
 	let ownerId = "";
 	if (!hasIdentifier) {
@@ -683,7 +690,7 @@ export const createComposePreview = async (
 			});
 			host = interpolated.replace("*", hostAppName);
 		} else {
-			host = await generateWildcardDomain(
+			host = await generatePreviewWildcardDomain(
 				domainTemplate,
 				`${appName}-${serviceSlug}`,
 				compose.server?.ipAddress || "",
@@ -766,6 +773,13 @@ const executeComposePreview = async ({
 			// Gitea clones read `giteaBranch`, so the preview must override it too
 			// or the base branch would be built instead of the pull request tip.
 			giteaBranch: previewDeployment.branch,
+			// Fork-safe checkout: the PR/MR head ref lives on the base repository
+			// even when `branch` only exists in a fork — see
+			// utils/providers/head-ref.ts. Null falls back to the branch.
+			headRef: buildPreviewHeadRef(
+				compose.sourceType,
+				previewDeployment.pullRequestNumber,
+			),
 			suffix: previewSuffix,
 			randomize: true,
 			isolatedDeployment: false,
@@ -781,7 +795,10 @@ const executeComposePreview = async ({
 
 		// Previews always re-clone (latest PR tip on every synchronize) and never
 		// apply patches (patch paths key off the base compose appName).
-		await runComposeBuild(entity, deployment, { applyPatches: false });
+		await runComposeBuild(entity, deployment, {
+			applyPatches: false,
+			cancellable: false,
+		});
 
 		await postComposePreviewComment(
 			compose,

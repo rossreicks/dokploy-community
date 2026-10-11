@@ -29,6 +29,28 @@ describe("redactSecrets", () => {
 		expect(redacted).toContain('echo "[REDACTED]" | base64 -d');
 	});
 
+	it("redacts the registry password piped into docker login", () => {
+		const password = "s3cr3t-registry-pass";
+		const command =
+			`echo ok; printf %s '${password}' | docker login 'localhost:5000' -u 'dokploy' --password-stdin || exit 1;` +
+			`printf %s '${password}' | docker login --username AWS --password-stdin 'x.dkr.ecr.eu-west-1.amazonaws.com';` +
+			`printf %s hunter2 | docker login reg.example.com -u u --password-stdin`;
+
+		const redacted = redactSecrets(command);
+
+		expect(redacted).not.toContain(password);
+		expect(redacted).not.toContain("hunter2");
+		expect(redacted).toContain(
+			`printf %s "[REDACTED]" | docker login 'localhost:5000' -u 'dokploy' --password-stdin`,
+		);
+		expect(redacted).toContain("docker login --username AWS");
+	});
+
+	it("does not touch an ordinary printf pipe", () => {
+		const command = "printf %s 'hello' | base64";
+		expect(redactSecrets(command)).toBe(command);
+	});
+
 	it("leaves commands without secrets untouched", () => {
 		const command =
 			"git clone --branch main --depth 1 git@github.com:org/repo.git /tmp/code";
@@ -188,5 +210,30 @@ describe("redactSecrets", () => {
 		expect(redacted).toContain(
 			"remote set-url origin [REDACTED] [REDACTED] [REDACTED]",
 		);
+	});
+});
+
+describe("redactSecrets shell-quoted values (#5519)", () => {
+	it("redacts a double-quoted value that contains escaped quotes", () => {
+		const redacted = redactSecrets(
+			String.raw`rclone rcat --s3-secret-access-key="say \"hi\" it's" --s3-region=us-east-1`,
+		);
+		expect(redacted).not.toContain("hi");
+		expect(redacted).toContain(
+			'--s3-secret-access-key="[REDACTED]" --s3-region=us-east-1',
+		);
+	});
+
+	it("redacts a DB password assignment that contains escaped quotes", () => {
+		const redacted = redactSecrets(
+			String.raw`PGPASSWORD="p\"a ss" pg_dump -h db`,
+		);
+		expect(redacted).not.toContain("ss");
+		expect(redacted).toBe('PGPASSWORD="[REDACTED]" pg_dump -h db');
+	});
+
+	it("still redacts a value with an unbalanced quote", () => {
+		const redacted = redactSecrets('rclone lsf --s3-access-key-id="oops next');
+		expect(redacted).not.toContain("oops");
 	});
 });

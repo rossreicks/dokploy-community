@@ -57,7 +57,7 @@ jobs:
               install.sh \
               .github/workflows/dokploy.yml \
               .github/workflows/sync-devino-canary.yml
-            git rm --force --ignore-unmatch CNAME
+            git rm --force --ignore-unmatch CNAME apps/dokploy/__test__/site/pages-site.test.ts
             git commit --amend --no-edit
             echo "conflicted=false" >> "$GITHUB_OUTPUT"
           else

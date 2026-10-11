@@ -33,6 +33,7 @@ import { ShowVolumeBackups } from "@/components/dashboard/application/volume-bac
 import { AddCommandCompose } from "@/components/dashboard/compose/advanced/add-command";
 import { IsolatedDeploymentTab } from "@/components/dashboard/compose/advanced/add-isolation";
 import { PullImagesCompose } from "@/components/dashboard/compose/advanced/pull-images";
+import { ShowComposeBuildServer } from "@/components/dashboard/compose/advanced/show-build-server";
 import { ShowComposeContainers } from "@/components/dashboard/compose/containers/show-compose-containers";
 import { DeleteService } from "@/components/dashboard/compose/delete-service";
 import { ShowGeneralCompose } from "@/components/dashboard/compose/general/show";
@@ -43,6 +44,7 @@ import { UpdateCompose } from "@/components/dashboard/compose/update-compose";
 import { ShowBackups } from "@/components/dashboard/database/backups/show-backups";
 import { ComposeFreeMonitoring } from "@/components/dashboard/monitoring/free/container/show-free-compose-monitoring";
 import { ComposePaidMonitoring } from "@/components/dashboard/monitoring/paid/container/show-paid-compose-monitoring";
+import { UptimelyServicePanel } from "@/components/dashboard/monitoring/uptimely/uptimely-service-panel";
 import { AssignComposeNetworks } from "@/components/dashboard/networks/assign-compose-networks";
 import { TransferService } from "@/components/dashboard/shared/transfer-service";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
@@ -453,7 +455,11 @@ const Service = (
 
 									{permissions?.monitoring.read && (
 										<TabsContent value="monitoring">
-											<div className="pt-2.5">
+											<div className="pt-2.5 flex flex-col gap-4">
+												<UptimelyServicePanel
+													serviceType="compose"
+													serviceId={composeId}
+												/>
 												<div className="flex flex-col border rounded-lg ">
 													{data?.serverId && isCloud ? (
 														<ComposePaidMonitoring
@@ -578,6 +584,7 @@ const Service = (
 													currentServerId={data?.serverId}
 												/>
 												<PullImagesCompose composeId={composeId} />
+												<ShowComposeBuildServer composeId={composeId} />
 											</div>
 										</TabsContent>
 									)}

@@ -96,4 +96,7 @@ export type AuditResourceType =
 	| "compose"
 	| "network"
 	| "vaultProvider"
-	| "dnsProvider";
+	| "dnsProvider"
+	| "dodomain"
+	| "uptimely"
+	| "snapvisor";

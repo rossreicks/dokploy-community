@@ -3,6 +3,7 @@
 import { Link2, Loader2, Unlink } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
+import type { EnabledSocialProviders } from "@/components/auth/social-login";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -19,6 +20,8 @@ const TRUSTED_PROVIDERS = ["google", "github"] as const;
 type SocialProvider = (typeof TRUSTED_PROVIDERS)[number];
 
 type AccountItem = {
+	/** Better Auth account row id, which 1.7 `unlinkAccount` expects. */
+	id: string;
 	providerId: string;
 	accountId?: string;
 };
@@ -27,7 +30,11 @@ function providerLabel(providerId: string): string {
 	return providerId.charAt(0).toUpperCase() + providerId.slice(1);
 }
 
-export function LinkingAccount() {
+export function LinkingAccount({
+	providers,
+}: {
+	providers: EnabledSocialProviders;
+}) {
 	const [accounts, setAccounts] = useState<AccountItem[]>([]);
 	const [accountsLoading, setAccountsLoading] = useState(true);
 	const [linkingProvider, setLinkingProvider] = useState<SocialProvider | null>(
@@ -84,12 +91,11 @@ export function LinkingAccount() {
 		}
 	};
 
-	const handleUnlink = async (providerId: string, accountId?: string) => {
+	const handleUnlink = async (providerId: string, accountId: string) => {
 		setUnlinkingProviderId(providerId);
 		try {
 			const { error } = await authClient.unlinkAccount({
-				providerId,
-				...(accountId && { accountId }),
+				accountId,
 			});
 			if (error) {
 				toast.error(error.message ?? "Failed to unlink account");
@@ -142,7 +148,7 @@ export function LinkingAccount() {
 							<ul className="space-y-2">
 								{socialAccounts.map((acc) => (
 									<li
-										key={acc.accountId ?? acc.providerId}
+										key={acc.id}
 										className="flex items-center justify-between rounded-lg border px-3 py-2 text-sm"
 									>
 										<span className="font-medium">
@@ -154,7 +160,7 @@ export function LinkingAccount() {
 												size="sm"
 												className="text-destructive hover:text-destructive hover:bg-destructive/10"
 												onClick={() =>
-													handleUnlink(acc.providerId, acc.accountId)
+													handleUnlink(acc.providerId, acc.id)
 												}
 												disabled={unlinkingProviderId === acc.providerId}
 												isLoading={unlinkingProviderId === acc.providerId}
@@ -180,7 +186,7 @@ export function LinkingAccount() {
 						redirected to complete the flow.
 					</p>
 					<div className="flex flex-wrap gap-3">
-						{!linkedProviderIds.has("google") && (
+						{providers.google && !linkedProviderIds.has("google") && (
 							<Button
 								variant="outline"
 								type="button"
@@ -214,7 +220,7 @@ export function LinkingAccount() {
 								Link with Google
 							</Button>
 						)}
-						{!linkedProviderIds.has("github") && (
+						{providers.github && !linkedProviderIds.has("github") && (
 							<Button
 								variant="outline"
 								type="button"
